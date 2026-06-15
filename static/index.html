@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <title>Sudoku PvP Arena</title>
+    
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div class="header">
+        <h1 id="status-title">Sudoku PvP Arena</h1>
+        <div id="room-msg">Menghubungkan jaringan...</div>
+        <button id="btnForceStart" style="display:none; background:#2ecc71; color:white; margin-top:10px;">START NOW (Minimal 2P) ⚔️</button>
+        <br>
+        <div class="timer" id="gameTimer" style="display:none;">Waktu: 00:00</div>
+    </div>
+
+    <div class="alert-toast" id="errorToast">Jawaban Salah!</div>
+
+    <div class="game-container">
+        <div class="sudoku-grid" id="sudokuGrid"></div>
+
+        <div class="side-panel">
+            <div class="controls">
+                <button id="btnUndo">Undo ↩️</button>
+                <button id="btnEraser">Eraser 🧽</button>
+                <button id="btnNotes">Notes: OFF 📝</button>
+                <button id="btnGiveUp" style="background:#ff7675; color:white;">Give Up 🏳️</button>
+            </div>
+
+            <div class="numpad">
+                <button class="num-btn" data-num="1">1</button>
+                <button class="num-btn" data-num="2">2</button>
+                <button class="num-btn" data-num="3">3</button>
+                <button class="num-btn" data-num="4">4</button>
+                <button class="num-btn" data-num="5">5</button>
+                <button class="num-btn" data-num="6">6</button>
+                <button class="num-btn" data-num="7">7</button>
+                <button class="num-btn" data-num="8">8</button>
+                <button class="num-btn" data-num="9">9</button>
+            </div>
+
+            <div class="scoreboard">
+                <h3>Leaderboard Live</h3>
+                <div id="playerList"></div>
+                <button class="lobby-btn" id="btnReturnLobby" onclick="window.location.reload();">Main Lagi (Antre Lobi) 🔄</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const ws = new WebSocket("ws://" + window.location.host + "/ws");
+        let myId = null;
+        let isNotesMode = false;
+        let isEraserMode = false;
+        let activeCell = null; 
+        let historyStack = []; 
+        let startTime, timerInterval;
+
+        const grid = document.getElementById("sudokuGrid");
+        const statusTitle = document.getElementById("status-title");
+        const roomMsg = document.getElementById("room-msg");
+        const playerListDiv = document.getElementById("playerList");
+        const forceStartBtn = document.getElementById("btnForceStart");
+        const returnLobbyBtn = document.getElementById("btnReturnLobby");
+        const toast = document.getElementById("errorToast");
+        const timerDiv = document.getElementById("gameTimer");
+
+        for (let r = 0; r < 9; r++) {
+            for (let c = 0; c < 9; c++) {
+                const container = document.createElement("div");
+                container.className = "cell-container";
+                container.dataset.row = r;
+                container.dataset.col = c;
+
+                const notesGrid = document.createElement("div");
+                notesGrid.className = "notes-grid";
+                for(let n=1; n<=9; n++) {
+                    const nSpan = document.createElement("span");
+                    nSpan.id = `n-${r}-${c}-${n}`;
+                    notesGrid.appendChild(nSpan);
+                }
+                container.appendChild(notesGrid);
+
+                const input = document.createElement("input");
+                input.type = "text";
+                input.className = "cell-input";
+                input.readOnly = true;
+
+                container.addEventListener("click", (e) => {
+                    document.querySelectorAll(".cell-container").forEach(el => el.classList.remove("selected"));
+                    
+                    if (input.classList.contains("static-cell") || input.classList.contains("locked-cell")) {
+                        activeCell = null;
+                        return;
+                    }
+                    
+                    container.classList.add("selected");
+                    activeCell = { row: r, col: c, input: input, container: container };
+
+                    if (isEraserMode) {
+                        executeEraser(activeCell);
+                    }
+                });
+
+                container.appendChild(input);
+                grid.appendChild(container);
+            }
+        }
+
+        function handleNumberInput(num) {
+            if (!activeCell || activeCell.input.classList.contains("locked-cell")) return;
+            const r = activeCell.row;
+            const c = activeCell.col;
+
+            if (isNotesMode) {
+                const noteItem = document.getElementById(`n-${r}-${c}-${num}`);
+                noteItem.innerText = noteItem.innerText === "" ? num : "";
+            } else {
+                clearCellNotes(r, c);
+                historyStack.push({ row: r, col: c, type: "INPUT", prevVal: activeCell.input.value });
+                activeCell.input.value = num;
+                highlightSameNumbers(num);
+                ws.send(JSON.stringify({ action: "INPUT", row: r, col: c, value: num }));
+            }
+        }
+
+        function executeEraser(cell) {
+            if (cell.input.classList.contains("locked-cell")) return;
+            historyStack.push({ row: cell.row, col: cell.col, type: "ERASE", prevVal: cell.input.value });
+            cell.input.value = "";
+            clearCellNotes(cell.row, cell.col);
+            highlightSameNumbers("");
+        }
+
+        function clearCellNotes(r, c) {
+            for(let n=1; n<=9; n++) document.getElementById(`n-${r}-${c}-${n}`).innerText = "";
+        }
+
+        function highlightSameNumbers(val) {
+            document.querySelectorAll(".cell-container").forEach(el => el.classList.remove("highlighted"));
+            if (!val || val === "" || val === undefined) return;
+            document.querySelectorAll(".cell-container").forEach(el => {
+                const inp = el.querySelector(".cell-input");
+                if (inp && inp.value == val) el.classList.add("highlighted");
+            });
+        }
+
+        window.addEventListener("keydown", e => {
+            if (e.key >= "1" && e.key <= "9") handleNumberInput(parseInt(e.key));
+        });
+
+        document.querySelectorAll(".num-btn").forEach(btn => {
+            btn.addEventListener("click", () => handleNumberInput(parseInt(btn.dataset.num)));
+        });
+
+        ws.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+
+            if (data.type === "CORRECT_ANSWER") {
+                const targetContainer = document.querySelector(`[data-row='${data.row}'][data-col='${data.col}']`);
+                const targetInput = targetContainer.querySelector(".cell-input");
+                targetInput.value = data.val;
+                targetInput.classList.add("locked-cell");
+                return;
+            }
+
+            if (data.type === "WAITING") {
+                statusTitle.innerText = "Lobby Arena";
+                roomMsg.innerText = data.message;
+                if (data.all_players && data.all_players.length >= 2) {
+                    forceStartBtn.style.display = "inline-block";
+                }
+            }
+
+            if (data.type === "START") {
+                forceStartBtn.style.display = "none";
+                statusTitle.innerText = "Match Dimulai!";
+                roomMsg.innerText = data.message;
+                myId = data.your_id;
+                timerDiv.style.display = "inline-block";
+                
+                startTime = Date.now();
+                timerInterval = setInterval(() => {
+                    const diff = Date.now() - startTime;
+                    const m = String(Math.floor(diff / 60000)).padStart(2, '0');
+                    const s = String(Math.floor((diff % 60000) / 1000)).padStart(2, '0');
+                    timerDiv.innerText = `Waktu: ${m}:${s}`;
+                }, 1000);
+
+                const cells = document.querySelectorAll(".cell-container");
+                cells.forEach(cell => {
+                    const r = cell.dataset.row;
+                    const c = cell.dataset.col;
+                    const inp = cell.querySelector(".cell-input");
+                    if (data.board[r][c] !== 0) {
+                        inp.value = data.board[r][c];
+                        inp.classList.add("static-cell");
+                    }
+                });
+            }
+
+            if (data.type === "WRONG_ANSWER") {
+                toast.innerText = data.message;
+                toast.style.display = "block";
+                setTimeout(() => { toast.style.display = "none"; }, 3000);
+                if (activeCell) activeCell.input.value = "";
+            }
+
+            if (data.type === "UPDATE" || data.type === "START" || data.type === "GAME_OVER") {
+                playerListDiv.innerHTML = "";
+                if (data.all_players) {
+                    data.all_players.sort((a,b) => b.score - a.score).forEach(p => {
+                        const isMe = p.id === myId ? " (Kamu)" : "";
+                        let statusText = p.is_dead ? "<span style='color:red; font-weight:bold;'>ELIMINATED</span>" : `Skor: ${p.score} | Nyawa: ${3-p.mistakes}/3`;
+                        
+                        if (p.id === myId && p.is_dead) {
+                            document.querySelectorAll(".cell-input").forEach(el => el.classList.add("locked-cell"));
+                            returnLobbyBtn.style.display = "block";
+                        }
+
+                        playerListDiv.innerHTML += `
+                            <div class="player-status">
+                                <strong>Player ${p.id}${isMe}</strong> - ${statusText}
+                                <div class="progress-bar"><div class="progress-fill" style="width: ${p.progress}%"></div></div>
+                            </div>
+                        `;
+                    });
+                }
+            }
+
+            if (data.type === "GAME_OVER") {
+                clearInterval(timerInterval);
+                statusTitle.innerText = "Match Selesai!";
+                roomMsg.innerText = data.message;
+                alert(data.message);
+                document.querySelectorAll(".cell-input").forEach(el => el.classList.add("locked-cell"));
+                returnLobbyBtn.style.display = "block"; 
+            }
+        };
+
+        const btnNotes = document.getElementById("btnNotes");
+        btnNotes.addEventListener("click", () => {
+            isNotesMode = !isNotesMode;
+            isEraserMode = false;
+            document.getElementById("btnEraser").classList.remove("active");
+            btnNotes.className = isNotesMode ? "active" : "";
+            btnNotes.innerText = isNotesMode ? "Notes: ON 📝" : "Notes: OFF 📝";
+        });
+
+        const btnEraser = document.getElementById("btnEraser");
+        btnEraser.addEventListener("click", () => {
+            isEraserMode = !isEraserMode;
+            isNotesMode = false;
+            btnNotes.classList.remove("active");
+            btnNotes.innerText = "Notes: OFF 📝";
+            btnEraser.className = isEraserMode ? "active" : "";
+            if (isEraserMode && activeCell) executeEraser(activeCell);
+        });
+
+        document.getElementById("btnUndo").addEventListener("click", () => {
+            if (historyStack.length > 0) {
+                const action = historyStack.pop();
+                const container = document.querySelector(`[data-row='${action.row}'][data-col='${action.col}']`);
+                const inp = container.querySelector(".cell-input");
+                if (inp && !inp.classList.contains("locked-cell")) {
+                    inp.value = action.prevVal;
+                    clearCellNotes(action.row, action.col);
+                    highlightSameNumbers(action.prevVal);
+                }
+            }
+        });
+
+        forceStartBtn.addEventListener("click", () => {
+            ws.send(JSON.stringify({ action: "FORCE_START" }));
+        });
+
+        document.getElementById("btnGiveUp").addEventListener("click", () => {
+            if(confirm("Yakin ingin menyerah dari pertandingan?")) ws.send(JSON.stringify({ action: "GIVE_UP" }));
+        });
+    </script>
+</body>
+</html>
